@@ -1,4 +1,9 @@
-use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    routing::{get, post},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::Row;
@@ -32,6 +37,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
+        .route("/permission-check", get(permission_check))
         .route("/me", axum::routing::get(me))
 }
 
@@ -233,5 +239,18 @@ async fn me(
         "email": row.get::<String, _>("email"),
         "is_active": is_active,
         "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+    })))
+}
+
+async fn permission_check(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user = crate::auth::authorization::authorize(&state, &headers, "users.read").await?;
+
+    Ok(Json(json!({
+        "message": "Permission granted.",
+        "user_id": user.id,
+        "permission": "users.read"
     })))
 }

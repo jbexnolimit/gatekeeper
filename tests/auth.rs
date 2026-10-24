@@ -545,3 +545,160 @@ async fn me_rejects_inactive_user() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn permissions_returns_empty_for_user_without_roles() {
+    dotenvy::dotenv().ok();
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let pool = gatekeeper::db::create_pool(&database_url)
+        .await
+        .expect("database connection should succeed");
+
+    let email = format!("{}@example.com", Uuid::new_v4());
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, password_hash) VALUES ($1, 'test-hash') RETURNING id",
+    )
+    .bind(&email)
+    .fetch_one(&pool)
+    .await
+    .expect("test user should be created");
+
+    let permissions = gatekeeper::auth::permissions::fetch_user_permissions(&pool, user_id)
+        .await
+        .expect("permission query should succeed");
+
+    assert!(permissions.is_empty());
+}
+
+#[tokio::test]
+async fn permissions_returns_permissions_from_assigned_role() {
+    dotenvy::dotenv().ok();
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let pool = gatekeeper::db::create_pool(&database_url)
+        .await
+        .expect("database connection should succeed");
+
+    let email = format!("{}@example.com", Uuid::new_v4());
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, password_hash) VALUES ($1, 'test-hash') RETURNING id",
+    )
+    .bind(&email)
+    .fetch_one(&pool)
+    .await
+    .expect("test user should be created");
+
+    let role_name = format!("test-role-{}", Uuid::new_v4());
+    let role_id: Uuid = sqlx::query_scalar("INSERT INTO roles (name) VALUES ($1) RETURNING id")
+        .bind(&role_name)
+        .fetch_one(&pool)
+        .await
+        .expect("test role should be created");
+
+    let permission_key = format!("test.permission.{}", Uuid::new_v4());
+    let permission_id: Uuid =
+        sqlx::query_scalar("INSERT INTO permissions (key) VALUES ($1) RETURNING id")
+            .bind(&permission_key)
+            .fetch_one(&pool)
+            .await
+            .expect("test permission should be created");
+
+    sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(role_id)
+        .execute(&pool)
+        .await
+        .expect("role should be assigned to user");
+
+    sqlx::query("INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(permission_id)
+        .execute(&pool)
+        .await
+        .expect("permission should be assigned to role");
+
+    let permissions = gatekeeper::auth::permissions::fetch_user_permissions(&pool, user_id)
+        .await
+        .expect("permission query should succeed");
+
+    assert_eq!(permissions, vec![permission_key]);
+}
+
+#[tokio::test]
+async fn permissions_combines_multiple_roles_without_duplicates() {
+    dotenvy::dotenv().ok();
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let pool = gatekeeper::db::create_pool(&database_url)
+        .await
+        .expect("database connection should succeed");
+
+    let email = format!("{}@example.com", Uuid::new_v4());
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (email, password_hash) VALUES ($1, 'test-hash') RETURNING id",
+    )
+    .bind(&email)
+    .fetch_one(&pool)
+    .await
+    .expect("test user should be created");
+
+    let role_one_name = format!("test-role-one-{}", Uuid::new_v4());
+    let role_two_name = format!("test-role-two-{}", Uuid::new_v4());
+
+    let role_one_id: Uuid = sqlx::query_scalar("INSERT INTO roles (name) VALUES ($1) RETURNING id")
+        .bind(&role_one_name)
+        .fetch_one(&pool)
+        .await
+        .expect("first role should be created");
+
+    let role_two_id: Uuid = sqlx::query_scalar("INSERT INTO roles (name) VALUES ($1) RETURNING id")
+        .bind(&role_two_name)
+        .fetch_one(&pool)
+        .await
+        .expect("second role should be created");
+
+    let shared_key = format!("test.shared.{}", Uuid::new_v4());
+    let second_key = format!("test.second.{}", Uuid::new_v4());
+
+    let shared_permission_id: Uuid =
+        sqlx::query_scalar("INSERT INTO permissions (key) VALUES ($1) RETURNING id")
+            .bind(&shared_key)
+            .fetch_one(&pool)
+            .await
+            .expect("shared permission should be created");
+
+    let second_permission_id: Uuid =
+        sqlx::query_scalar("INSERT INTO permissions (key) VALUES ($1) RETURNING id")
+            .bind(&second_key)
+            .fetch_one(&pool)
+            .await
+            .expect("second permission should be created");
+
+    for role_id in [role_one_id, role_two_id] {
+        sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(role_id)
+            .execute(&pool)
+            .await
+            .expect("role should be assigned to user");
+    }
+
+    sqlx::query(
+        "INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2), ($3, $4), ($3, $5)",
+    )
+    .bind(role_one_id)
+    .bind(shared_permission_id)
+    .bind(role_two_id)
+    .bind(shared_permission_id)
+    .bind(second_permission_id)
+    .execute(&pool)
+    .await
+    .expect("permissions should be assigned to roles");
+
+    let permissions = gatekeeper::auth::permissions::fetch_user_permissions(&pool, user_id)
+        .await
+        .expect("permission query should succeed");
+
+    let mut expected = vec![shared_key, second_key];
+    expected.sort();
+
+    assert_eq!(permissions, expected);
+}
