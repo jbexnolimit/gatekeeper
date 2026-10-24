@@ -702,3 +702,219 @@ async fn permissions_combines_multiple_roles_without_duplicates() {
 
     assert_eq!(permissions, expected);
 }
+
+#[tokio::test]
+async fn permission_check_rejects_missing_token() {
+    let app = test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/auth/permission-check")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn permission_check_rejects_user_without_permission() {
+    let app = test_app().await;
+    let email = format!("{}@example.com", Uuid::new_v4());
+    let password = "TestPassword123!";
+
+    // Register a user.
+    let register_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": email,
+                        "password": password
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(register_response.status(), StatusCode::CREATED);
+
+    // Log in to obtain a valid JWT.
+    let login_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": email,
+                        "password": password
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(login_response.status(), StatusCode::OK);
+
+    let body = to_bytes(login_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let login: Value = serde_json::from_slice(&body).unwrap();
+    let token = login["access_token"].as_str().unwrap();
+
+    // The new user has no roles, so users.read should be denied.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/auth/permission-check")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let actual: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(actual["error"], "permission_denied");
+}
+
+#[tokio::test]
+async fn permission_check_allows_user_with_permission() {
+    let app = test_app().await;
+    let email = format!("{}@example.com", Uuid::new_v4());
+    let password = "TestPassword123!";
+
+    // Register the user.
+    let register_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": email,
+                        "password": password
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(register_response.status(), StatusCode::CREATED);
+
+    let register_body = to_bytes(register_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let registered: Value = serde_json::from_slice(&register_body).unwrap();
+    let user_id = Uuid::parse_str(registered["id"].as_str().unwrap()).unwrap();
+
+    // Create the role and required permission.
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let pool = gatekeeper::db::create_pool(&database_url)
+        .await
+        .expect("database connection should succeed");
+
+    let role_name = format!("test-users-reader-{}", Uuid::new_v4());
+    let role_id: Uuid = sqlx::query_scalar("INSERT INTO roles (name) VALUES ($1) RETURNING id")
+        .bind(&role_name)
+        .fetch_one(&pool)
+        .await
+        .expect("test role should be created");
+
+    let permission_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO permissions (key) VALUES ('users.read') \
+         ON CONFLICT (key) DO UPDATE SET key = EXCLUDED.key \
+         RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("users.read permission should exist");
+
+    sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(role_id)
+        .execute(&pool)
+        .await
+        .expect("role should be assigned to user");
+
+    sqlx::query("INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(permission_id)
+        .execute(&pool)
+        .await
+        .expect("permission should be assigned to role");
+
+    // Log in to obtain a JWT.
+    let login_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": email,
+                        "password": password
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(login_response.status(), StatusCode::OK);
+
+    let login_body = to_bytes(login_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let login: Value = serde_json::from_slice(&login_body).unwrap();
+    let token = login["access_token"].as_str().unwrap();
+
+    // Access the protected endpoint.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/auth/permission-check")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let actual: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(actual["user_id"], user_id.to_string());
+    assert_eq!(actual["permission"], "users.read");
+    assert_eq!(actual["message"], "Permission granted.");
+}
