@@ -12,8 +12,11 @@ use validator::Validate;
 use crate::{
     AppState,
     auth::password::{hash_password, verify_password},
+    auth::refresh_token::{generate_refresh_token, hash_refresh_token},
     auth::token::{create_access_token, validate_access_token},
 };
+
+const REFRESH_TOKEN_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct RegisterRequest {
@@ -33,10 +36,22 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RefreshTokenRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LogoutRequest {
+    pub refresh_token: String,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
+        .route("/refresh", post(refresh))
+        .route("/logout", post(logout))
         .route("/permission-check", get(permission_check))
         .route("/me", axum::routing::get(me))
 }
@@ -164,11 +179,177 @@ async fn login(
         )
     })?;
 
+    let refresh_token = generate_refresh_token();
+    let refresh_token_hash = hash_refresh_token(&refresh_token);
+
+    let refresh_expiry = sqlx::query(
+        "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) \
+        VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 second'))",
+    )
+    .bind(user_id)
+    .bind(&refresh_token_hash)
+    .bind(REFRESH_TOKEN_TTL_SECONDS)
+    .execute(&state.db)
+    .await;
+
+    if let Err(error) = refresh_expiry {
+        eprintln!("Refresh token insert failed: {error}");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "refresh_token_creation_failed"})),
+        ));
+    }
+
     Ok(Json(json!({
         "access_token": access_token,
+        "refresh_token": refresh_token,
         "token_type": "Bearer",
-        "expires_in": 900
+        "expires_in": 900,
+        "refresh_expires_in": REFRESH_TOKEN_TTL_SECONDS
     })))
+}
+
+async fn refresh(
+    State(state): State<AppState>,
+    Json(payload): Json<RefreshTokenRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if payload.refresh_token.trim().is_empty() {
+        return Err(refresh_token_error());
+    }
+
+    let old_hash = hash_refresh_token(&payload.refresh_token);
+    let mut tx = state.db.begin().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "refresh_failed"})),
+        )
+    })?;
+
+    let row = sqlx::query(
+        "SELECT rt.id, rt.user_id \
+         FROM refresh_tokens rt \
+         JOIN users u ON u.id = rt.user_id \
+         WHERE rt.token_hash = $1 \
+           AND rt.revoked_at IS NULL \
+           AND rt.expires_at > NOW() \
+           AND u.is_active = TRUE \
+         FOR UPDATE OF rt",
+    )
+    .bind(&old_hash)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "refresh_failed"})),
+        )
+    })?;
+
+    let Some(row) = row else {
+        return Err(refresh_token_error());
+    };
+
+    let old_id: uuid::Uuid = row.get("id");
+    let user_id: uuid::Uuid = row.get("user_id");
+
+    let secret = std::env::var("JWT_SECRET").map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "authentication_configuration_error"})),
+        )
+    })?;
+
+    let access_token = create_access_token(user_id, &secret).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "token_creation_failed"})),
+        )
+    })?;
+
+    let new_refresh_token = generate_refresh_token();
+    let new_hash = hash_refresh_token(&new_refresh_token);
+
+    sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = NOW() \
+         WHERE id = $1 AND revoked_at IS NULL",
+    )
+    .bind(old_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "refresh_failed"})),
+        )
+    })?;
+
+    sqlx::query(
+        "INSERT INTO refresh_tokens (user_id, token_hash, expires_at) \
+         VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 second'))",
+    )
+    .bind(user_id)
+    .bind(&new_hash)
+    .bind(REFRESH_TOKEN_TTL_SECONDS)
+    .execute(&mut *tx)
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "refresh_failed"})),
+        )
+    })?;
+
+    tx.commit().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "refresh_failed"})),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "Bearer",
+        "expires_in": 900,
+        "refresh_expires_in": REFRESH_TOKEN_TTL_SECONDS
+    })))
+}
+
+async fn logout(
+    State(state): State<AppState>,
+    Json(payload): Json<LogoutRequest>,
+) -> Result<StatusCode, (StatusCode, Json<Value>)> {
+    if payload.refresh_token.trim().is_empty() {
+        return Err(refresh_token_error());
+    }
+
+    let token_hash = hash_refresh_token(&payload.refresh_token);
+
+    sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = NOW() \
+         WHERE token_hash = $1 AND revoked_at IS NULL",
+    )
+    .bind(&token_hash)
+    .execute(&state.db)
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "logout_failed"})),
+        )
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn refresh_token_error() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "error": "invalid_refresh_token",
+            "message": "The refresh token is invalid, expired, or revoked."
+        })),
+    )
 }
 
 fn authentication_error() -> (StatusCode, Json<Value>) {

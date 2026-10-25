@@ -918,3 +918,182 @@ async fn permission_check_allows_user_with_permission() {
     assert_eq!(actual["permission"], "users.read");
     assert_eq!(actual["message"], "Permission granted.");
 }
+
+#[tokio::test]
+async fn refresh_rotates_refresh_token() {
+    let app = test_app().await;
+    let email = format!("{}@example.com", Uuid::new_v4());
+    let password = "TestPassword123!";
+
+    let register_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"email": email, "password": password}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(register_response.status(), StatusCode::CREATED);
+
+    let login_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"email": email, "password": password}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(login_response.status(), StatusCode::OK);
+
+    let login_body = to_bytes(login_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let login_json: Value = serde_json::from_slice(&login_body).unwrap();
+    let old_refresh_token = login_json["refresh_token"]
+        .as_str()
+        .expect("login should return a refresh token")
+        .to_owned();
+
+    let refresh_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"refresh_token": old_refresh_token}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(refresh_response.status(), StatusCode::OK);
+
+    let refresh_body = to_bytes(refresh_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let refresh_json: Value = serde_json::from_slice(&refresh_body).unwrap();
+
+    assert!(refresh_json["access_token"].as_str().is_some());
+
+    let new_refresh_token = refresh_json["refresh_token"]
+        .as_str()
+        .expect("refresh should return a new refresh token");
+
+    assert_ne!(old_refresh_token, new_refresh_token);
+
+    let reuse_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"refresh_token": old_refresh_token}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(reuse_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn logout_revokes_refresh_token() {
+    let app = test_app().await;
+    let email = format!("{}@example.com", Uuid::new_v4());
+    let password = "TestPassword123!";
+
+    let register_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"email": email, "password": password}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(register_response.status(), StatusCode::CREATED);
+
+    let login_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"email": email, "password": password}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(login_response.status(), StatusCode::OK);
+
+    let login_body = to_bytes(login_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let login_json: Value = serde_json::from_slice(&login_body).unwrap();
+    let refresh_token = login_json["refresh_token"]
+        .as_str()
+        .expect("login should return a refresh token")
+        .to_owned();
+
+    let logout_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"refresh_token": refresh_token}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(logout_response.status(), StatusCode::NO_CONTENT);
+
+    let refresh_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"refresh_token": refresh_token}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(refresh_response.status(), StatusCode::UNAUTHORIZED);
+}
