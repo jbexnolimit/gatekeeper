@@ -2,8 +2,9 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, post},
+    routing::get,
 };
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{Error as SqlxError, Row};
@@ -34,10 +35,13 @@ pub fn router() -> Router<AppState> {
             "/permissions",
             get(list_permissions).post(create_permission),
         )
-        .route("/users/{user_id}/roles", post(assign_role_to_user))
+        .route(
+            "/users/{user_id}/roles",
+            get(list_user_roles).post(assign_role_to_user),
+        )
         .route(
             "/roles/{role_id}/permissions",
-            post(assign_permission_to_role),
+            get(list_role_permissions).post(assign_permission_to_role),
         )
 }
 
@@ -107,6 +111,128 @@ async fn list_permissions(
         .collect();
 
     Ok(Json(json!({ "permissions": permissions })))
+}
+
+async fn list_user_roles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<uuid::Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize(&state, &headers, "roles.read").await?;
+
+    let user_exists = sqlx::query("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+        .bind(user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "user_roles_lookup_failed"})),
+            )
+        })?
+        .get::<bool, _>(0);
+
+    if !user_exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "user_not_found"})),
+        ));
+    }
+
+    let rows = sqlx::query(
+        "SELECT r.id, r.name, r.description, r.created_at \
+         FROM roles r \
+         INNER JOIN user_roles ur ON ur.role_id = r.id \
+         WHERE ur.user_id = $1 \
+         ORDER BY r.name",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "user_roles_lookup_failed"})),
+        )
+    })?;
+
+    let roles: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.get::<uuid::Uuid, _>("id"),
+                "name": row.get::<String, _>("name"),
+                "description": row.get::<Option<String>, _>("description"),
+                "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "user_id": user_id,
+        "roles": roles
+    })))
+}
+
+async fn list_role_permissions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(role_id): Path<uuid::Uuid>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize(&state, &headers, "permissions.read").await?;
+
+    let role_exists = sqlx::query("SELECT EXISTS(SELECT 1 FROM roles WHERE id = $1)")
+        .bind(role_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "role_permissions_lookup_failed"})),
+            )
+        })?
+        .get::<bool, _>(0);
+
+    if !role_exists {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "role_not_found"})),
+        ));
+    }
+
+    let rows = sqlx::query(
+        "SELECT p.id, p.key, p.description, p.created_at \
+         FROM permissions p \
+         INNER JOIN role_permissions rp ON rp.permission_id = p.id \
+         WHERE rp.role_id = $1 \
+         ORDER BY p.key",
+    )
+    .bind(role_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "role_permissions_lookup_failed"})),
+        )
+    })?;
+
+    let permissions: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.get::<uuid::Uuid, _>("id"),
+                "key": row.get::<String, _>("key"),
+                "description": row.get::<Option<String>, _>("description"),
+                "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "role_id": role_id,
+        "permissions": permissions
+    })))
 }
 
 async fn create_role(

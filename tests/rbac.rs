@@ -1077,3 +1077,165 @@ async fn assign_permission_rejects_nonexistent_permission() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn list_user_roles_rejects_missing_token() {
+    let app = test_app().await;
+    let user_id = uuid::Uuid::new_v4();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/rbac/users/{user_id}/roles"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn list_role_permissions_rejects_missing_token() {
+    let app = test_app().await;
+    let role_id = uuid::Uuid::new_v4();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/rbac/roles/{role_id}/permissions"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn list_user_roles_allows_user_with_permission() {
+    let (app, token) = app_with_permission("roles.read").await;
+    let user_id = register_assignment_test_user(&app).await;
+    let role_id = create_assignment_test_role().await;
+
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
+
+    sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(role_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/rbac/users/{user_id}/roles"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["user_id"], user_id.to_string());
+    assert!(
+        result["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|role| role["id"] == role_id.to_string())
+    );
+}
+
+#[tokio::test]
+async fn list_role_permissions_allows_user_with_permission() {
+    let (app, token) = app_with_permission("permissions.read").await;
+    let role_id = create_assignment_test_role().await;
+    let permission_id = create_assignment_test_permission().await;
+
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
+
+    sqlx::query("INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(permission_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/rbac/roles/{role_id}/permissions"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(result["role_id"], role_id.to_string());
+    assert!(
+        result["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|permission| permission["id"] == permission_id.to_string())
+    );
+}
+
+#[tokio::test]
+async fn list_user_roles_rejects_nonexistent_user() {
+    let (app, token) = app_with_permission("roles.read").await;
+    let user_id = uuid::Uuid::new_v4();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/rbac/users/{user_id}/roles"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn list_role_permissions_rejects_nonexistent_role() {
+    let (app, token) = app_with_permission("permissions.read").await;
+    let role_id = uuid::Uuid::new_v4();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/rbac/roles/{role_id}/permissions"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
