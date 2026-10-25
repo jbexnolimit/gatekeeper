@@ -17,6 +17,7 @@ pub fn app(pool: PgPool) -> Router {
         .route("/health", get(health_check))
         .route("/ready", get(readiness_check))
         .nest("/api/auth", auth::routes::router())
+        .nest("/api/rbac", auth::rbac::router())
         .with_state(state)
 }
 
