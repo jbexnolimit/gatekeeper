@@ -19,6 +19,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = gatekeeper::db::create_pool(&database_url).await?;
     info!("Connected to PostgreSQL");
 
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    info!("Database migrations checked successfully");
+
     let addr: SocketAddr = env::var("BIND_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:8001".to_string())
         .parse()?;
