@@ -140,6 +140,17 @@ async fn login(
 
     let email = payload.email.trim().to_lowercase();
 
+    let retry_after = login_blocked_for(&state.db, &email).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "login_failed"})),
+        )
+    })?;
+
+    if let Some(seconds) = retry_after {
+        return Err(login_rate_limit_error(seconds));
+    }
+
     let row = sqlx::query("SELECT id, password_hash, is_active FROM users WHERE email = $1")
         .bind(&email)
         .fetch_optional(&state.db)
@@ -152,6 +163,13 @@ async fn login(
         })?;
 
     let Some(row) = row else {
+        record_failed_login(&state.db, &email).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "login_failed"})),
+            )
+        })?;
+
         return Err(authentication_error());
     };
 
@@ -162,8 +180,26 @@ async fn login(
     let password_matches = verify_password(&payload.password, &password_hash).unwrap_or(false);
 
     if !password_matches || !is_active {
+        record_failed_login(&state.db, &email).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "login_failed"})),
+            )
+        })?;
+
         return Err(authentication_error());
     }
+
+    sqlx::query("DELETE FROM login_rate_limits WHERE email = $1")
+        .bind(&email)
+        .execute(&state.db)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "login_failed"})),
+            )
+        })?;
 
     let secret = std::env::var("JWT_SECRET").map_err(|_| {
         (
@@ -434,4 +470,103 @@ async fn permission_check(
         "user_id": user.id,
         "permission": "users.read"
     })))
+}
+
+const DEFAULT_LOGIN_MAX_FAILED_ATTEMPTS: i32 = 5;
+const DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS: i64 = 900;
+const DEFAULT_LOGIN_RATE_LIMIT_COOLDOWN_SECONDS: i64 = 900;
+
+fn login_rate_limit_setting<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<T>().ok())
+        .unwrap_or(default)
+}
+
+async fn login_blocked_for(pool: &sqlx::PgPool, email: &str) -> Result<Option<i64>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT GREATEST(
+            1,
+            CEIL(EXTRACT(EPOCH FROM (blocked_until - NOW())))::BIGINT
+         ) AS retry_after
+         FROM login_rate_limits
+         WHERE email = $1 AND blocked_until > NOW()",
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| row.get::<i64, _>("retry_after")))
+}
+
+async fn record_failed_login(pool: &sqlx::PgPool, email: &str) -> Result<(), sqlx::Error> {
+    let max_attempts = login_rate_limit_setting(
+        "LOGIN_MAX_FAILED_ATTEMPTS",
+        DEFAULT_LOGIN_MAX_FAILED_ATTEMPTS,
+    );
+    let window_seconds = login_rate_limit_setting(
+        "LOGIN_RATE_LIMIT_WINDOW_SECONDS",
+        DEFAULT_LOGIN_RATE_LIMIT_WINDOW_SECONDS,
+    );
+    let cooldown_seconds = login_rate_limit_setting(
+        "LOGIN_RATE_LIMIT_COOLDOWN_SECONDS",
+        DEFAULT_LOGIN_RATE_LIMIT_COOLDOWN_SECONDS,
+    );
+
+    sqlx::query(
+        "INSERT INTO login_rate_limits (
+            email, failed_attempts, window_started_at, blocked_until, updated_at
+         )
+         VALUES (
+            $1, 1, NOW(),
+            CASE WHEN $2 <= 1
+                THEN NOW() + ($3 * INTERVAL '1 second')
+                ELSE NULL
+            END,
+            NOW()
+         )
+         ON CONFLICT (email) DO UPDATE SET
+            failed_attempts = CASE
+                WHEN login_rate_limits.window_started_at
+                    <= NOW() - ($4 * INTERVAL '1 second')
+                THEN 1
+                ELSE login_rate_limits.failed_attempts + 1
+            END,
+            window_started_at = CASE
+                WHEN login_rate_limits.window_started_at
+                    <= NOW() - ($4 * INTERVAL '1 second')
+                THEN NOW()
+                ELSE login_rate_limits.window_started_at
+            END,
+            blocked_until = CASE
+                WHEN CASE
+                    WHEN login_rate_limits.window_started_at
+                        <= NOW() - ($4 * INTERVAL '1 second')
+                    THEN 1
+                    ELSE login_rate_limits.failed_attempts + 1
+                END >= $2
+                THEN NOW() + ($3 * INTERVAL '1 second')
+                ELSE NULL
+            END,
+            updated_at = NOW()",
+    )
+    .bind(email)
+    .bind(max_attempts)
+    .bind(cooldown_seconds)
+    .bind(window_seconds)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+fn login_rate_limit_error(retry_after_seconds: i64) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": "too_many_login_attempts",
+            "message": "Too many failed login attempts. Please try again later.",
+            "retry_after_seconds": retry_after_seconds
+        })),
+    )
 }

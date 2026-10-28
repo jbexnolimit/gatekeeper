@@ -12,7 +12,8 @@ use uuid::Uuid;
 async fn test_app() -> axum::Router {
     dotenvy::dotenv().ok();
 
-    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
 
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
@@ -164,7 +165,8 @@ async fn registration_stores_a_password_hash() {
     assert_eq!(response.status(), StatusCode::CREATED);
 
     dotenvy::dotenv().ok();
-    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
 
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
@@ -339,7 +341,8 @@ async fn login_rejects_inactive_account() {
 
     assert_eq!(register_response.status(), StatusCode::CREATED);
 
-    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -520,7 +523,8 @@ async fn me_rejects_inactive_user() {
     let token = login["access_token"].as_str().unwrap();
 
     dotenvy::dotenv().ok();
-    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -549,7 +553,8 @@ async fn me_rejects_inactive_user() {
 #[tokio::test]
 async fn permissions_returns_empty_for_user_without_roles() {
     dotenvy::dotenv().ok();
-    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -573,7 +578,8 @@ async fn permissions_returns_empty_for_user_without_roles() {
 #[tokio::test]
 async fn permissions_returns_permissions_from_assigned_role() {
     dotenvy::dotenv().ok();
-    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -626,7 +632,8 @@ async fn permissions_returns_permissions_from_assigned_role() {
 #[tokio::test]
 async fn permissions_combines_multiple_roles_without_duplicates() {
     dotenvy::dotenv().ok();
-    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -833,7 +840,8 @@ async fn permission_check_allows_user_with_permission() {
     let user_id = Uuid::parse_str(registered["id"].as_str().unwrap()).unwrap();
 
     // Create the role and required permission.
-    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -1096,4 +1104,131 @@ async fn logout_revokes_refresh_token() {
         .unwrap();
 
     assert_eq!(refresh_response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn login_rate_limit_blocks_repeated_failed_attempts() {
+    dotenvy::dotenv().ok();
+
+    let max_attempts = env::var("LOGIN_MAX_FAILED_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(5);
+
+    let app = test_app().await;
+    let email = format!("{}@example.com", Uuid::new_v4());
+
+    for _ in 0..max_attempts {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "email": email,
+                            "password": "WrongPassword123!"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": email,
+                        "password": "WrongPassword123!"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let actual: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(actual["error"], "too_many_login_attempts");
+    assert!(actual["retry_after_seconds"].as_i64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn successful_login_clears_failed_login_rate_limit() {
+    let app = test_app().await;
+    let email = format!("{}@example.com", Uuid::new_v4());
+    let password = "TestPassword123!";
+
+    let register_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"email": email, "password": password}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(register_response.status(), StatusCode::CREATED);
+
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let pool = gatekeeper::db::create_pool(&database_url)
+        .await
+        .expect("test database connection should succeed");
+
+    sqlx::query(
+        "INSERT INTO login_rate_limits
+            (email, failed_attempts, window_started_at, blocked_until, updated_at)
+         VALUES ($1, 1, NOW(), NULL, NOW())",
+    )
+    .bind(&email)
+    .execute(&pool)
+    .await
+    .expect("failed-login record should be inserted");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"email": email, "password": password}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let remaining =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM login_rate_limits WHERE email = $1")
+            .bind(&email)
+            .fetch_one(&pool)
+            .await
+            .expect("rate-limit record count should be queried");
+
+    assert_eq!(remaining, 0);
 }
