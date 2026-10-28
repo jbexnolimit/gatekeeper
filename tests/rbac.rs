@@ -1239,3 +1239,224 @@ async fn list_role_permissions_rejects_nonexistent_role() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn remove_role_from_user_allows_authorized_user() {
+    let (app, token) = app_with_permission("roles.assign").await;
+    let user_id = register_assignment_test_user(&app).await;
+    let role_id = create_assignment_test_role().await;
+
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
+
+    sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(role_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/rbac/users/{user_id}/roles/{role_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_id = $1 AND role_id = $2")
+            .bind(user_id)
+            .bind(role_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn remove_role_from_user_rejects_missing_token() {
+    let app = test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/rbac/users/{}/roles/{}",
+                    uuid::Uuid::new_v4(),
+                    uuid::Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn remove_role_from_user_rejects_missing_assignment() {
+    let (app, token) = app_with_permission("roles.assign").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/rbac/users/{}/roles/{}",
+                    uuid::Uuid::new_v4(),
+                    uuid::Uuid::new_v4()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn remove_role_from_user_rejects_insufficient_permission() {
+    let (app, token) = app_with_permission("roles.read").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/rbac/users/{}/roles/{}",
+                    uuid::Uuid::new_v4(),
+                    uuid::Uuid::new_v4()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn remove_permission_from_role_allows_authorized_user() {
+    let (app, token) = app_with_permission("permissions.assign").await;
+    let role_id = create_assignment_test_role().await;
+    let permission_id = create_assignment_test_permission().await;
+
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
+
+    sqlx::query("INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)")
+        .bind(role_id)
+        .bind(permission_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/rbac/roles/{role_id}/permissions/{permission_id}"
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM role_permissions WHERE role_id = $1 AND permission_id = $2",
+    )
+    .bind(role_id)
+    .bind(permission_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn remove_permission_from_role_rejects_missing_token() {
+    let app = test_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/rbac/roles/{}/permissions/{}",
+                    uuid::Uuid::new_v4(),
+                    uuid::Uuid::new_v4()
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn remove_permission_from_role_rejects_missing_assignment() {
+    let (app, token) = app_with_permission("permissions.assign").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/rbac/roles/{}/permissions/{}",
+                    uuid::Uuid::new_v4(),
+                    uuid::Uuid::new_v4()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn remove_permission_from_role_rejects_insufficient_permission() {
+    let (app, token) = app_with_permission("permissions.read").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!(
+                    "/api/rbac/roles/{}/permissions/{}",
+                    uuid::Uuid::new_v4(),
+                    uuid::Uuid::new_v4()
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}

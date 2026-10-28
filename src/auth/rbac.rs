@@ -40,8 +40,16 @@ pub fn router() -> Router<AppState> {
             get(list_user_roles).post(assign_role_to_user),
         )
         .route(
+            "/users/{user_id}/roles/{role_id}",
+            axum::routing::delete(remove_role_from_user),
+        )
+        .route(
             "/roles/{role_id}/permissions",
             get(list_role_permissions).post(assign_permission_to_role),
+        )
+        .route(
+            "/roles/{role_id}/permissions/{permission_id}",
+            axum::routing::delete(remove_permission_from_role),
         )
 }
 
@@ -253,7 +261,7 @@ async fn create_role(
     }
 
     let name = input.name.trim().to_owned();
-    let description = normalize_description(input.description);
+    let description = input.description;
 
     if name.is_empty() {
         return Err((
@@ -444,6 +452,73 @@ async fn assign_permission_to_role(
             Json(json!({"error": "permission_assignment_failed"})),
         )),
     }
+}
+
+async fn remove_role_from_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((user_id, role_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize(&state, &headers, "roles.assign").await?;
+
+    let result = sqlx::query("DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2")
+        .bind(user_id)
+        .bind(role_id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "role_removal_failed"})),
+            )
+        })?;
+
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "role_assignment_not_found"})),
+        ));
+    }
+
+    Ok(Json(json!({
+        "message": "role_removed",
+        "user_id": user_id,
+        "role_id": role_id
+    })))
+}
+
+async fn remove_permission_from_role(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((role_id, permission_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    authorize(&state, &headers, "permissions.assign").await?;
+
+    let result =
+        sqlx::query("DELETE FROM role_permissions WHERE role_id = $1 AND permission_id = $2")
+            .bind(role_id)
+            .bind(permission_id)
+            .execute(&state.db)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "permission_removal_failed"})),
+                )
+            })?;
+
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "permission_assignment_not_found"})),
+        ));
+    }
+
+    Ok(Json(json!({
+        "message": "permission_removed",
+        "role_id": role_id,
+        "permission_id": permission_id
+    })))
 }
 
 fn normalize_description(description: Option<String>) -> Option<String> {
