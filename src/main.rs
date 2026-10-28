@@ -7,6 +7,11 @@ use tracing::info;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
+    let jwt_secret = env::var("JWT_SECRET").map_err(|_| "JWT_SECRET must be set")?;
+    gatekeeper::auth::token::validate_jwt_secret(&jwt_secret).map_err(std::io::Error::other)?;
+
+    drop(jwt_secret);
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
