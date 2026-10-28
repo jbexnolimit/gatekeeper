@@ -10,7 +10,7 @@ use tower::ServiceExt;
 async fn health_check_returns_ok() {
     dotenvy::dotenv().ok();
 
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
 
     let pool = gatekeeper::db::create_pool(&database_url)
         .await

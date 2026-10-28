@@ -7,7 +7,7 @@ use tower::ServiceExt;
 async fn test_app() -> axum::Router {
     dotenvy::dotenv().ok();
 
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
 
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
@@ -213,7 +213,7 @@ async fn list_roles_allows_user_with_permission() {
     let user_id = Uuid::parse_str(registered["id"].as_str().unwrap()).unwrap();
 
     let pool = gatekeeper::db::create_pool(
-        &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
+        &std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"),
     )
     .await
     .unwrap();
@@ -321,7 +321,7 @@ async fn list_permissions_allows_user_with_permission() {
     let user_id = Uuid::parse_str(registered["id"].as_str().unwrap()).unwrap();
 
     let pool = gatekeeper::db::create_pool(
-        &std::env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
+        &std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"),
     )
     .await
     .unwrap();
@@ -404,7 +404,7 @@ async fn app_with_permission(required_permission: &str) -> (axum::Router, String
     use uuid::Uuid;
 
     dotenvy::dotenv().ok();
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
     let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
     let app = gatekeeper::app(pool.clone());
 
@@ -815,7 +815,7 @@ async fn register_assignment_test_user(app: &axum::Router) -> uuid::Uuid {
 }
 
 async fn create_assignment_test_role() -> uuid::Uuid {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
     let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
 
     sqlx::query_scalar("INSERT INTO roles (name) VALUES ($1) RETURNING id")
@@ -826,7 +826,7 @@ async fn create_assignment_test_role() -> uuid::Uuid {
 }
 
 async fn create_assignment_test_permission() -> uuid::Uuid {
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
     let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
 
     sqlx::query_scalar("INSERT INTO permissions (key) VALUES ($1) RETURNING id")
@@ -1120,7 +1120,7 @@ async fn list_user_roles_allows_user_with_permission() {
     let user_id = register_assignment_test_user(&app).await;
     let role_id = create_assignment_test_role().await;
 
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
     let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
 
     sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)")
@@ -1164,7 +1164,7 @@ async fn list_role_permissions_allows_user_with_permission() {
     let role_id = create_assignment_test_role().await;
     let permission_id = create_assignment_test_permission().await;
 
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
     let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
 
     sqlx::query("INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)")
@@ -1246,7 +1246,7 @@ async fn remove_role_from_user_allows_authorized_user() {
     let user_id = register_assignment_test_user(&app).await;
     let role_id = create_assignment_test_role().await;
 
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
     let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
 
     sqlx::query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)")
@@ -1355,7 +1355,7 @@ async fn remove_permission_from_role_allows_authorized_user() {
     let role_id = create_assignment_test_role().await;
     let permission_id = create_assignment_test_permission().await;
 
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set");
     let pool = gatekeeper::db::create_pool(&database_url).await.unwrap();
 
     sqlx::query("INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2)")

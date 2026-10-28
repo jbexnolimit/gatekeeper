@@ -12,7 +12,7 @@ use uuid::Uuid;
 async fn test_app() -> axum::Router {
     dotenvy::dotenv().ok();
 
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
 
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
@@ -164,7 +164,7 @@ async fn registration_stores_a_password_hash() {
     assert_eq!(response.status(), StatusCode::CREATED);
 
     dotenvy::dotenv().ok();
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
 
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
@@ -339,7 +339,7 @@ async fn login_rejects_inactive_account() {
 
     assert_eq!(register_response.status(), StatusCode::CREATED);
 
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -520,7 +520,7 @@ async fn me_rejects_inactive_user() {
     let token = login["access_token"].as_str().unwrap();
 
     dotenvy::dotenv().ok();
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -549,7 +549,7 @@ async fn me_rejects_inactive_user() {
 #[tokio::test]
 async fn permissions_returns_empty_for_user_without_roles() {
     dotenvy::dotenv().ok();
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -573,7 +573,7 @@ async fn permissions_returns_empty_for_user_without_roles() {
 #[tokio::test]
 async fn permissions_returns_permissions_from_assigned_role() {
     dotenvy::dotenv().ok();
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -626,7 +626,7 @@ async fn permissions_returns_permissions_from_assigned_role() {
 #[tokio::test]
 async fn permissions_combines_multiple_roles_without_duplicates() {
     dotenvy::dotenv().ok();
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
@@ -833,7 +833,7 @@ async fn permission_check_allows_user_with_permission() {
     let user_id = Uuid::parse_str(registered["id"].as_str().unwrap()).unwrap();
 
     // Create the role and required permission.
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+    let database_url = env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
     let pool = gatekeeper::db::create_pool(&database_url)
         .await
         .expect("database connection should succeed");
