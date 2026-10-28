@@ -1232,3 +1232,90 @@ async fn successful_login_clears_failed_login_rate_limit() {
 
     assert_eq!(remaining, 0);
 }
+
+#[tokio::test]
+async fn expired_login_cooldown_allows_a_fresh_attempt_window() {
+    dotenvy::dotenv().ok();
+
+    let app = test_app().await;
+    let email = format!("{}@example.com", Uuid::new_v4());
+
+    let database_url =
+        env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set in .env");
+    let pool = gatekeeper::db::create_pool(&database_url)
+        .await
+        .expect("test database connection should succeed");
+
+    let max_attempts = env::var("LOGIN_MAX_FAILED_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(5);
+
+    sqlx::query(
+        "INSERT INTO login_rate_limits
+            (email, failed_attempts, window_started_at, blocked_until, updated_at)
+         VALUES ($1, $2, NOW(), NOW() - INTERVAL '1 second', NOW())",
+    )
+    .bind(&email)
+    .bind(max_attempts)
+    .execute(&pool)
+    .await
+    .expect("expired cooldown record should be inserted");
+
+    // The first failed login after cooldown expiry should return 401.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": email,
+                        "password": "WrongPassword123!"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // The failed-attempt counter should have restarted.
+    let row = sqlx::query(
+        "SELECT failed_attempts, blocked_until IS NULL AS not_blocked
+         FROM login_rate_limits
+         WHERE email = $1",
+    )
+    .bind(&email)
+    .fetch_one(&pool)
+    .await
+    .expect("rate limit record should exist");
+
+    assert_eq!(row.get::<i32, _>("failed_attempts"), 1);
+    assert!(row.get::<bool, _>("not_blocked"));
+
+    // A second failed login should also return 401, not 429.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "email": email,
+                        "password": "WrongPassword123!"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}

@@ -516,35 +516,49 @@ async fn record_failed_login(pool: &sqlx::PgPool, email: &str) -> Result<(), sql
     sqlx::query(
         "INSERT INTO login_rate_limits (
             email, failed_attempts, window_started_at, blocked_until, updated_at
-         )
-         VALUES (
+        )
+        VALUES (
             $1, 1, NOW(),
             CASE WHEN $2 <= 1
                 THEN NOW() + ($3 * INTERVAL '1 second')
                 ELSE NULL
             END,
             NOW()
-         )
-         ON CONFLICT (email) DO UPDATE SET
+        )
+        ON CONFLICT (email) DO UPDATE SET
             failed_attempts = CASE
                 WHEN login_rate_limits.window_started_at
-                    <= NOW() - ($4 * INTERVAL '1 second')
+                        <= NOW() - ($4 * INTERVAL '1 second')
+                OR (
+                        login_rate_limits.blocked_until IS NOT NULL
+                        AND login_rate_limits.blocked_until <= NOW()
+                )
                 THEN 1
                 ELSE login_rate_limits.failed_attempts + 1
             END,
             window_started_at = CASE
                 WHEN login_rate_limits.window_started_at
-                    <= NOW() - ($4 * INTERVAL '1 second')
+                        <= NOW() - ($4 * INTERVAL '1 second')
+                OR (
+                        login_rate_limits.blocked_until IS NOT NULL
+                        AND login_rate_limits.blocked_until <= NOW()
+                )
                 THEN NOW()
                 ELSE login_rate_limits.window_started_at
             END,
             blocked_until = CASE
-                WHEN CASE
-                    WHEN login_rate_limits.window_started_at
-                        <= NOW() - ($4 * INTERVAL '1 second')
-                    THEN 1
-                    ELSE login_rate_limits.failed_attempts + 1
-                END >= $2
+                WHEN (
+                    CASE
+                        WHEN login_rate_limits.window_started_at
+                                <= NOW() - ($4 * INTERVAL '1 second')
+                        OR (
+                                login_rate_limits.blocked_until IS NOT NULL
+                                AND login_rate_limits.blocked_until <= NOW()
+                        )
+                        THEN 1
+                        ELSE login_rate_limits.failed_attempts + 1
+                    END
+                ) >= $2
                 THEN NOW() + ($3 * INTERVAL '1 second')
                 ELSE NULL
             END,
